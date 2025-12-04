@@ -44,7 +44,7 @@ except ImportError:
 
 from strings import get_string
 
-asstUserName = ultroid_bot.me.username
+asstUserName = "hackintush"
 LOG_CHANNEL = udB.get_key("LOG_CHANNEL")
 ACTIVE_CALLS, VC_QUEUE = [], {}
 MSGID_CACHE, VIDEO_ON = {}, {}
