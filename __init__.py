@@ -11,7 +11,7 @@ from telethon.errors.rpcerrorlist import (
     ParticipantJoinMissingError,
     ChatSendMediaForbiddenError,
 )
-from CythonX import HNDLR, LOGS, asst, udB, vcClient
+from CythonX import HNDLR, LOGS, ultroid_bot, udB, vcClient
 from CythonX._misc._decorators import compile_pattern
 from CythonX.fns.helper import (
     bash,
@@ -44,7 +44,7 @@ except ImportError:
 
 from strings import get_string
 
-asstUserName = asst.me.username
+asstUserName = ultroid_bot.me.username
 LOG_CHANNEL = udB.get_key("LOG_CHANNEL")
 ACTIVE_CALLS, VC_QUEUE = [], {}
 MSGID_CACHE, VIDEO_ON = {}, {}
