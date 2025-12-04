@@ -226,7 +226,7 @@ def vc_asst(dec, **kwargs):
                 await func(e)
             except Exception:
                 LOGS.exception(Exception)
-                await asst.send_message(
+                await ultroid_bot.send_message(
                     LOG_CHANNEL,
                     f"VC Error - <code>{UltVer}</code>\n\n<code>{e.text}</code>\n\n<code>{format_exc()}</code>",
                     parse_mode="html",
