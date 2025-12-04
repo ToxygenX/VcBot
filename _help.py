@@ -1,11 +1,11 @@
 from telethon import Button
 
-from . import vc_asst, asst, in_pattern
+from . import vc_asst, ultroid_bot, in_pattern
 
 
 @vc_asst("vchelp")
 async def helper(event):
-    res = await event.client.inline_query(asst.me.username, "vchelp")
+    res = await event.client.inline_query(ultroid_bot.me.username, "vchelp")
     try:
         await res[0].click(event.chat_id)
     except Exception as e:
