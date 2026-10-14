@@ -74,11 +74,51 @@ _IGNORE_STREAM_END = set()
 _calls: PyTgCalls | None = None
 _calls_lock = asyncio.Lock()
 _handlers_ready = False
+_mtproto_detect_patched = False
 
 
 def VC_AUTHS():
     _vcsudos = udB.get_key("VC_SUDOS") or []
     return [int(a) for a in [*owner_and_sudos(), *_vcsudos]]
+
+
+def _patch_pytgcalls_client_detect() -> None:
+    """Make py-tgcalls accept UltroidClient / Telethon subclasses.
+
+    py-tgcalls detects the MTProto library from
+    ``type(client).__module__.split('.')[0]``. UltroidClient lives in
+    ``CythonX.startup.BaseClient``, so detection returns ``CythonX`` and
+    raises ``InvalidMTProtoClient``. Treat any ``TelegramClient`` subclass
+    as Telethon (and Pyrogram ``Client`` likewise).
+    """
+    global _mtproto_detect_patched
+    if _mtproto_detect_patched:
+        return
+    from pytgcalls.mtproto.bridged_client import BridgedClient
+
+    @staticmethod
+    def package_name(obj):
+        name = str(obj.__class__.__module__).split(".")[0]
+        if name in ("telethon", "pyrogram"):
+            return name
+        try:
+            from telethon import TelegramClient
+
+            if isinstance(obj, TelegramClient):
+                return "telethon"
+        except Exception:
+            pass
+        try:
+            from pyrogram import Client as PyroClient
+
+            if isinstance(obj, PyroClient):
+                return "pyrogram"
+        except Exception:
+            pass
+        return name
+
+    BridgedClient.package_name = package_name
+    _mtproto_detect_patched = True
 
 
 def _audio_stream(source: str) -> MediaStream:
@@ -104,6 +144,7 @@ async def get_calls() -> PyTgCalls:
     global _calls, _handlers_ready
     async with _calls_lock:
         if _calls is None:
+            _patch_pytgcalls_client_detect()
             _calls = PyTgCalls(vcClient)
             await _calls.start()
             LOGS.info("VCBot: NTgCalls / PyTgCalls client started.")
