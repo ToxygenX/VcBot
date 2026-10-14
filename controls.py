@@ -17,9 +17,9 @@
    Skip the current song and play the next in queue, if any.
 """
 
-from pytgcalls.exceptions import NotConnectedError
+from pytgcalls.exceptions import NotInCallError
 
-from . import vc_asst, Player, get_string,CLIENTS,VIDEO_ON
+from . import vc_asst, Player, get_string, CLIENTS, VIDEO_ON
 
 
 @vc_asst("joinvc")
@@ -33,7 +33,7 @@ async def join_(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat, event)
-    if not ultSongs.group_call.is_connected:
+    if not await ultSongs.is_connected():
         await ultSongs.vc_joiner()
 
 
@@ -48,11 +48,9 @@ async def leaver(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
-    await ultSongs.group_call.stop()
-    if CLIENTS.get(chat):
-        del CLIENTS[chat]
-    if VIDEO_ON.get(chat):
-        del VIDEO_ON[chat]
+    await ultSongs.stop()
+    CLIENTS.pop(chat, None)
+    VIDEO_ON.pop(chat, None)
     await event.eor(get_string("vcbot_1"))
 
 
@@ -68,8 +66,8 @@ async def rejoiner(event):
         chat = event.chat_id
     ultSongs = Player(chat)
     try:
-        await ultSongs.group_call.reconnect()
-    except NotConnectedError:
+        await ultSongs.reconnect()
+    except NotInCallError:
         return await event.eor(get_string("vcbot_6"))
     await event.eor(get_string("vcbot_5"))
 
@@ -79,7 +77,8 @@ async def volume_setter(event):
     if len(event.text.split()) <= 1:
         return await event.eor(get_string("vcbot_4"))
     inp = event.text.split()
-    if inp[1].startswith(("@","-")):
+    vol = None
+    if inp[1].startswith(("@", "-")):
         chat = inp[1]
         vol = int(inp[2])
         try:
@@ -89,14 +88,14 @@ async def volume_setter(event):
     elif inp[1].isdigit() and len(inp) == 2:
         vol = int(inp[1])
         chat = event.chat_id
-    if vol:
-        ultSongs = Player(chat)
-        await ultSongs.group_call.set_my_volume(int(vol))
-        if vol > 200:
-            vol = 200
-        elif vol < 1:
-            vol = 1
-        return await event.eor(get_string("vcbot_3").format(vol))
+    else:
+        return await event.eor(get_string("vcbot_4"))
+    if vol is None:
+        return await event.eor(get_string("vcbot_4"))
+    vol = max(1, min(200, vol))
+    ultSongs = Player(chat)
+    await ultSongs.set_my_volume(vol)
+    return await event.eor(get_string("vcbot_3").format(vol))
 
 
 @vc_asst("skip")

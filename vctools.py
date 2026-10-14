@@ -16,6 +16,8 @@
 • `{i}replay`
    Re-play the current song from the beginning.
 """
+from pytgcalls.exceptions import NotInCallError
+
 from . import vc_asst, Player, get_string
 
 
@@ -30,7 +32,10 @@ async def mute(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
-    await ultSongs.group_call.set_is_mute(True)
+    try:
+        await ultSongs.set_is_mute(True)
+    except NotInCallError:
+        return await event.eor(get_string("vcbot_6"))
     await event.eor(get_string("vcbot_12"))
 
 
@@ -45,7 +50,10 @@ async def unmute(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
-    await ultSongs.group_call.set_is_mute(False)
+    try:
+        await ultSongs.set_is_mute(False)
+    except NotInCallError:
+        return await event.eor(get_string("vcbot_6"))
     await event.eor("`UnMuted playback in this chat.`")
 
 
@@ -60,7 +68,10 @@ async def pauser(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
-    await ultSongs.group_call.set_pause(True)
+    try:
+        await ultSongs.set_pause(True)
+    except NotInCallError:
+        return await event.eor(get_string("vcbot_6"))
     await event.eor(get_string("vcbot_14"))
 
 
@@ -75,7 +86,10 @@ async def resumer(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
-    await ultSongs.group_call.set_pause(False)
+    try:
+        await ultSongs.set_pause(False)
+    except NotInCallError:
+        return await event.eor(get_string("vcbot_6"))
     await event.eor(get_string("vcbot_13"))
 
 
@@ -90,5 +104,8 @@ async def replayer(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
-    ultSongs.group_call.restart_playout()
+    try:
+        await ultSongs.restart_playout()
+    except NotInCallError:
+        return await event.eor(get_string("vcbot_6"))
     await event.eor("`Re-playing the current song.`")

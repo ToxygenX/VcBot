@@ -7,7 +7,16 @@
 """
 
 import re
-from . import vc_asst, get_string, inline_mention, Player, dl_playlist, add_to_queue, is_url_ok, VC_QUEUE
+from . import (
+    vc_asst,
+    get_string,
+    inline_mention,
+    Player,
+    dl_playlist,
+    add_to_queue,
+    is_url_ok,
+    VC_QUEUE,
+)
 
 
 @vc_asst("ytplaylist")
@@ -35,7 +44,7 @@ async def live_stream(e):
         chat, inline_mention(e), song
     )
     ultSongs = Player(chat, e)
-    if not ultSongs.group_call.is_connected:
+    if not await ultSongs.is_connected():
         if not (await ultSongs.vc_joiner()):
             return
         from_user = inline_mention(e.sender)
@@ -48,7 +57,7 @@ async def live_stream(e):
         )
 
         await xx.delete()
-        await ultSongs.group_call.start_audio(file)
+        await ultSongs.start_audio(file)
     else:
         from_user = inline_mention(e)
         add_to_queue(chat, file, title, link, thumb, from_user, duration)

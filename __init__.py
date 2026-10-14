@@ -1,16 +1,36 @@
+"""
+CɪᴘʜᴇʀX VCBot — Telegram voice/video chat powered by NTgCalls.
+
+Uses py-tgcalls (MTProto bridge) with ntgcalls (native WebRTC engine).
+Compatible with Python 3.10+ including 3.14.
+"""
+
 import asyncio
 import os
-import re
 import traceback
 from time import time
 from traceback import format_exc
 
-from pytgcalls import GroupCallFactory
-from pytgcalls.exceptions import GroupCallNotFoundError
-from telethon.errors.rpcerrorlist import (
-    ParticipantJoinMissingError,
-    ChatSendMediaForbiddenError,
+from telethon.errors.rpcerrorlist import ChatSendMediaForbiddenError
+from telethon import events
+from telethon.tl import functions
+
+from pytgcalls import PyTgCalls
+from pytgcalls import filters as call_filters
+from pytgcalls.exceptions import (
+    NoActiveGroupCall,
+    NotInCallError,
 )
+from pytgcalls.types import (
+    AudioQuality,
+    ChatUpdate,
+    Device,
+    GroupCallConfig,
+    MediaStream,
+    StreamEnded,
+    VideoQuality,
+)
+
 from CythonX import HNDLR, LOGS, asst, udB, vcClient
 from CythonX._misc._decorators import compile_pattern
 from CythonX.fns.helper import (
@@ -27,9 +47,6 @@ from CythonX._misc import owner_and_sudos, sudoers
 from CythonX._misc._assistant import in_pattern
 from CythonX._misc._wrappers import eod, eor
 from CythonX.version import __version__ as UltVer
-from telethon import events
-from telethon.tl import functions, types
-from telethon.utils import get_display_name
 
 try:
     from yt_dlp import YoutubeDL
@@ -38,7 +55,7 @@ except ImportError:
     LOGS.error("'yt-dlp' not found!")
 
 try:
-   from youtubesearchpython import VideosSearch
+    from youtubesearchpython import VideosSearch
 except ImportError:
     VideosSearch = None
 
@@ -48,7 +65,15 @@ asstUserName = asst.me.username
 LOG_CHANNEL = udB.get_key("LOG_CHANNEL")
 ACTIVE_CALLS, VC_QUEUE = [], {}
 MSGID_CACHE, VIDEO_ON = {}, {}
-CLIENTS = {}
+# chat_id -> last played MediaStream source (path/url) + video flag
+CURRENT_SOURCE = {}
+CLIENTS = {}  # kept for compatibility; maps chat -> Player meta
+# Suppress stream-end while replacing media (skip / replay / new play).
+_IGNORE_STREAM_END = set()
+
+_calls: PyTgCalls | None = None
+_calls_lock = asyncio.Lock()
+_handlers_ready = False
 
 
 def VC_AUTHS():
@@ -56,19 +81,91 @@ def VC_AUTHS():
     return [int(a) for a in [*owner_and_sudos(), *_vcsudos]]
 
 
+def _audio_stream(source: str) -> MediaStream:
+    return MediaStream(
+        source,
+        audio_parameters=AudioQuality.HIGH,
+        video_flags=MediaStream.Flags.IGNORE,
+    )
+
+
+def _video_stream(source: str) -> MediaStream:
+    return MediaStream(
+        source,
+        audio_parameters=AudioQuality.HIGH,
+        video_parameters=VideoQuality.HD_720p,
+        audio_flags=MediaStream.Flags.REQUIRED,
+        video_flags=MediaStream.Flags.AUTO_DETECT,
+    )
+
+
+async def get_calls() -> PyTgCalls:
+    """Lazy-init a single NTgCalls-backed PyTgCalls client on vcClient."""
+    global _calls, _handlers_ready
+    async with _calls_lock:
+        if _calls is None:
+            _calls = PyTgCalls(vcClient)
+            await _calls.start()
+            LOGS.info("VCBot: NTgCalls / PyTgCalls client started.")
+        if not _handlers_ready:
+            @_calls.on_update(call_filters.stream_end())
+            async def _on_stream_end(_, update: StreamEnded):
+                # Advance queue once per track (audio capture end).
+                if update.device != Device.MICROPHONE:
+                    return
+                chat_id = update.chat_id
+                source = CURRENT_SOURCE.pop(chat_id, None)
+                if source and isinstance(source.get("path"), str):
+                    path = source["path"]
+                    if os.path.exists(path) and path.startswith("vcbot/"):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+                try:
+                    await Player(chat_id).play_from_queue()
+                except Exception:
+                    LOGS.exception("VCBot stream-end handler failed")
+
+            @_calls.on_update(
+                call_filters.chat_update(ChatUpdate.Status.LEFT_CALL)
+            )
+            async def _on_chat_update(_, update: ChatUpdate):
+                chat_id = update.chat_id
+                if chat_id in ACTIVE_CALLS:
+                    ACTIVE_CALLS.remove(chat_id)
+                CURRENT_SOURCE.pop(chat_id, None)
+                VIDEO_ON.pop(chat_id, None)
+                CLIENTS.pop(chat_id, None)
+
+            _handlers_ready = True
+        return _calls
+
+
 class Player:
+    """High-level voice-chat controller for a single chat."""
+
     def __init__(self, chat, event=None, video=False):
-        self._chat = chat
+        self._chat = int(chat)
         self._current_chat = event.chat_id if event else LOG_CHANNEL
         self._video = video
-        if CLIENTS.get(chat):
-            self.group_call = CLIENTS[chat]
-        else:
-            _client = GroupCallFactory(
-                vcClient, GroupCallFactory.MTPROTO_CLIENT_TYPE.TELETHON,
-            )
-            self.group_call = _client.get_group_call()
-            CLIENTS.update({chat: self.group_call})
+        CLIENTS[self._chat] = self
+
+    @property
+    def group_call(self):
+        """Back-compat alias so older call sites can still reference Player."""
+        return self
+
+    async def calls(self) -> PyTgCalls:
+        return await get_calls()
+
+    async def is_connected(self) -> bool:
+        call = await self.calls()
+        try:
+            active = await call.group_calls
+            return self._chat in active
+        except Exception:
+            return self._chat in ACTIVE_CALLS
 
     async def make_vc_active(self):
         try:
@@ -83,73 +180,183 @@ class Player:
         return True, None
 
     async def startCall(self):
-        if VIDEO_ON:
-            for chats in VIDEO_ON:
-                await VIDEO_ON[chats].stop()
-            VIDEO_ON.clear()
-            await asyncio.sleep(3)
+        """Join the group call (auto-starts VC if needed)."""
+        call = await self.calls()
         if self._video:
-            for chats in list(CLIENTS):
-                if chats != self._chat:
-                    await CLIENTS[chats].stop()
-                    del CLIENTS[chats]
-            VIDEO_ON.update({self._chat: self.group_call})
+            # Keep one video session at a time for stability.
+            for chat_id in list(VIDEO_ON):
+                if chat_id != self._chat:
+                    try:
+                        await call.leave_call(chat_id)
+                    except (NotInCallError, Exception):
+                        pass
+                    VIDEO_ON.pop(chat_id, None)
+            VIDEO_ON[self._chat] = True
+
         if self._chat not in ACTIVE_CALLS:
             try:
-                self.group_call.on_network_status_changed(self.on_network_changed)
-                self.group_call.on_playout_ended(self.playout_ended_handler)
-                await self.group_call.join(self._chat)
-            except GroupCallNotFoundError as er:
-                LOGS.info(er)
+                await call.play(
+                    self._chat,
+                    None,
+                    GroupCallConfig(auto_start=True),
+                )
+            except NoActiveGroupCall:
                 dn, err = await self.make_vc_active()
                 if err:
                     return False, err
+                try:
+                    await call.play(
+                        self._chat,
+                        None,
+                        GroupCallConfig(auto_start=True),
+                    )
+                except Exception as e:
+                    LOGS.exception(e)
+                    return False, e
             except Exception as e:
                 LOGS.exception(e)
                 return False, e
+            if self._chat not in ACTIVE_CALLS:
+                ACTIVE_CALLS.append(self._chat)
         return True, None
 
-    async def on_network_changed(self, call, is_connected):
-        chat = self._chat
-        if is_connected:
-            if chat not in ACTIVE_CALLS:
-                ACTIVE_CALLS.append(chat)
-        elif chat in ACTIVE_CALLS:
-            ACTIVE_CALLS.remove(chat)
+    async def play_media(self, source: str, video: bool | None = None):
+        """Play audio or video into the active call via NTgCalls."""
+        is_video = self._video if video is None else video
+        call = await self.calls()
+        stream = _video_stream(source) if is_video else _audio_stream(source)
+        CURRENT_SOURCE[self._chat] = {"path": source, "video": is_video}
+        if is_video:
+            VIDEO_ON[self._chat] = True
+        elif self._chat in VIDEO_ON:
+            VIDEO_ON.pop(self._chat, None)
 
-    async def playout_ended_handler(self, call, source, mtype):
-        if os.path.exists(source):
-            os.remove(source)
-        await self.play_from_queue()
+        try:
+            await call.play(
+                self._chat,
+                stream,
+                GroupCallConfig(auto_start=True),
+            )
+        except NoActiveGroupCall:
+            dn, err = await self.make_vc_active()
+            if err:
+                raise err
+            await call.play(
+                self._chat,
+                stream,
+                GroupCallConfig(auto_start=True),
+            )
+        if self._chat not in ACTIVE_CALLS:
+            ACTIVE_CALLS.append(self._chat)
+
+    # ---- back-compat method names used across plugins ----
+
+    async def start_audio(self, source: str):
+        await self.play_media(source, video=False)
+
+    async def start_video(self, source: str, with_audio: bool = True):
+        await self.play_media(source, video=True)
+
+    async def stop(self):
+        call = await self.calls()
+        try:
+            await call.leave_call(self._chat)
+        except (NotInCallError, NoActiveGroupCall):
+            pass
+        except Exception as e:
+            LOGS.exception(e)
+        if self._chat in ACTIVE_CALLS:
+            ACTIVE_CALLS.remove(self._chat)
+        CURRENT_SOURCE.pop(self._chat, None)
+        VIDEO_ON.pop(self._chat, None)
+        CLIENTS.pop(self._chat, None)
+
+    async def leave_call(self):
+        await self.stop()
+
+    async def reconnect(self):
+        meta = CURRENT_SOURCE.get(self._chat)
+        try:
+            await self.stop()
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+        ok, err = await self.startCall()
+        if not ok:
+            if isinstance(err, Exception):
+                raise NotInCallError() from err
+            raise NotInCallError()
+        if meta and meta.get("path"):
+            await self.play_media(meta["path"], video=bool(meta.get("video")))
+
+    async def set_my_volume(self, vol: int):
+        vol = max(1, min(200, int(vol)))
+        call = await self.calls()
+        await call.change_volume_call(self._chat, vol)
+
+    async def set_is_mute(self, mute: bool):
+        call = await self.calls()
+        if mute:
+            await call.mute(self._chat)
+        else:
+            await call.unmute(self._chat)
+
+    async def set_pause(self, paused: bool):
+        call = await self.calls()
+        if paused:
+            await call.pause(self._chat)
+        else:
+            await call.resume(self._chat)
+
+    async def restart_playout(self):
+        meta = CURRENT_SOURCE.get(self._chat)
+        if not meta or not meta.get("path"):
+            raise NotInCallError()
+        await self.play_media(meta["path"], video=bool(meta.get("video")))
+
+    async def stop_video(self):
+        if self._chat in VIDEO_ON:
+            VIDEO_ON.pop(self._chat, None)
+        # Switch to idle join (no camera) if still in call.
+        if await self.is_connected():
+            call = await self.calls()
+            try:
+                await call.play(self._chat, None, GroupCallConfig(auto_start=False))
+            except Exception:
+                pass
 
     async def play_from_queue(self):
         chat_id = self._chat
         if chat_id in VIDEO_ON:
-            await self.group_call.stop_video()
-            VIDEO_ON.pop(chat_id)
+            await self.stop_video()
         try:
             song, title, link, thumb, from_user, pos, dur = await get_from_queue(
                 chat_id
             )
             try:
-                await self.group_call.start_audio(song)
-            except ParticipantJoinMissingError:
+                await self.start_audio(song)
+            except NotInCallError:
                 await self.vc_joiner()
-                await self.group_call.start_audio(song)
+                await self.start_audio(song)
             if MSGID_CACHE.get(chat_id):
-                await MSGID_CACHE[chat_id].delete()
+                try:
+                    await MSGID_CACHE[chat_id].delete()
+                except Exception:
+                    pass
                 del MSGID_CACHE[chat_id]
-            text = f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>\n⏰ Duration:</strong> <code>{dur}</code>\n👤 <strong>Requested by:</strong> {from_user}"
-
+            text = (
+                f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>\n"
+                f"⏰ Duration:</strong> <code>{dur}</code>\n"
+                f"👤 <strong>Requested by:</strong> {from_user}"
+            )
             try:
                 xx = await vcClient.send_message(
                     self._current_chat,
-                    f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>\n⏰ Duration:</strong> <code>{dur}</code>\n👤 <strong>Requested by:</strong> {from_user}",
+                    text,
                     file=thumb,
                     link_preview=False,
                     parse_mode="html",
                 )
-
             except ChatSendMediaForbiddenError:
                 xx = await vcClient.send_message(
                     self._current_chat, text, link_preview=False, parse_mode="html"
@@ -160,8 +367,7 @@ class Player:
                 VC_QUEUE.pop(chat_id)
 
         except (IndexError, KeyError):
-            await self.group_call.stop()
-            del CLIENTS[self._chat]
+            await self.stop()
             await vcClient.send_message(
                 self._current_chat,
                 f"• Successfully Left Vc : <code>{chat_id}</code> •",
@@ -185,7 +391,6 @@ class Player:
                 f"• Joined VC in <code>{chat_id}</code>",
                 parse_mode="html",
             )
-
             return True
         await vcClient.send_message(
             self._current_chat,
@@ -311,17 +516,14 @@ async def download(query):
 
 async def get_stream_link(ytlink):
     """
-    info = YoutubeDL({}).extract_info(url=ytlink, download=False)
-    k = ""
-    for x in info["formats"]:
-        h, w = ([x["height"], x["width"]])
-        if h and w:
-            if h <= 720 and w <= 1280:
-                k = x["url"]
-    return k
+    Prefer a direct ffmpeg-friendly URL. NTgCalls/MediaStream also accepts
+    YouTube links natively via yt-dlp, so we fall back to the original URL.
     """
     stream = await bash(f'yt-dlp -g -f "best[height<=?720][width<=?1280]" {ytlink}')
-    return stream[0]
+    url = (stream[0] or "").strip()
+    if url and not url.lower().startswith("error"):
+        return url.splitlines()[0]
+    return ytlink
 
 
 async def vid_download(query):
@@ -336,25 +538,6 @@ async def vid_download(query):
 
 
 async def dl_playlist(chat, from_user, link):
-    # untill issue get fix
-    # https://github.com/alexmercerind/youtube-search-python/issues/107
-    """
-    vids = Playlist.getVideos(link)
-    try:
-        vid1 = vids["videos"][0]
-        duration = vid1["duration"] or "♾"
-        title = vid1["title"]
-        song = await get_stream_link(vid1['link'])
-        thumb = f"https://i.ytimg.com/vi/{vid1['id']}/hqdefault.jpg"
-        return song[0], thumb, title, vid1["link"], duration
-    finally:
-        vids = vids["videos"][1:]
-        for z in vids:
-            duration = z["duration"] or "♾"
-            title = z["title"]
-            thumb = f"https://i.ytimg.com/vi/{z['id']}/hqdefault.jpg"
-            add_to_queue(chat, None, title, z["link"], thumb, from_user, duration)
-    """
     links = await get_videos_link(link)
     try:
         search = VideosSearch(links[0], limit=1).result()

@@ -14,9 +14,23 @@
    Stream Live YouTube
 """
 
-import re,os
+import re
+import os
 from telethon.tl import types
-from . import vc_asst, get_string, inline_mention, add_to_queue, mediainfo, file_download, LOGS, is_url_ok, bash, download, Player, VC_QUEUE
+from . import (
+    vc_asst,
+    get_string,
+    inline_mention,
+    add_to_queue,
+    mediainfo,
+    file_download,
+    LOGS,
+    is_url_ok,
+    bash,
+    download,
+    Player,
+    VC_QUEUE,
+)
 from telethon.errors.rpcerrorlist import ChatSendMediaForbiddenError, MessageIdInvalidError
 
 
@@ -27,7 +41,6 @@ async def play_music_(event):
     try:
         xx = await event.eor(get_string("com_1"), parse_mode="md")
     except MessageIdInvalidError:
-        # Changing the way, things work
         xx = event
         xx.out = False
     chat = event.chat_id
@@ -53,7 +66,8 @@ async def play_music_(event):
         else:
             song = input
     if not (reply or song):
-        return await xx.eor("Please specify a song name or reply to a audio file !", time=5
+        return await xx.eor(
+            "Please specify a song name or reply to a audio file !", time=5
         )
     await xx.eor(get_string("vcbot_20"), parse_mode="md")
     if reply and reply.media and mediainfo(reply.media).startswith(("audio", "video")):
@@ -64,10 +78,10 @@ async def play_music_(event):
             link = link.strip().split()
     ultSongs = Player(chat, event)
     song_name = f"{song_name[:30]}..."
-    if not ultSongs.group_call.is_connected:
+    if not await ultSongs.is_connected():
         if not (await ultSongs.vc_joiner()):
             return
-        await ultSongs.group_call.start_audio(song)
+        await ultSongs.start_audio(song)
         if isinstance(link, list):
             for lin in link[1:]:
                 add_to_queue(chat, song, lin, lin, None, from_user, duration)
@@ -106,7 +120,7 @@ async def play_music_(event):
 
 
 @vc_asst("playfrom")
-async def play_music_(event):
+async def play_music_from(event):
     msg = await event.eor(get_string("com_1"))
     chat = event.chat_id
     limit = 10
@@ -140,10 +154,10 @@ async def play_music_(event):
             msg, song, fast_download=False
         )
         song_name = f"{song_name[:30]}..."
-        if not ultSongs.group_call.is_connected:
+        if not await ultSongs.is_connected():
             if not (await ultSongs.vc_joiner()):
                 return
-            await ultSongs.group_call.start_audio(song)
+            await ultSongs.start_audio(song)
             text = "🎸 <strong>Now playing: <a href={}>{}</a>\n⏰ Duration:</strong> <code>{}</code>\n👥 <strong>Chat:</strong> <code>{}</code>\n🙋‍♂ <strong>Requested by: {}</strong>".format(
                 link, song_name, duration, chat, from_user
             )
@@ -186,9 +200,9 @@ async def radio_mirchi(e):
     if not is_url_ok(song):
         return await xx.eor(f"`{song}`\n\nNot a playable link.🥱")
     ultSongs = Player(chat, e)
-    if not ultSongs.group_call.is_connected and not (await ultSongs.vc_joiner()):
+    if not await ultSongs.is_connected() and not (await ultSongs.vc_joiner()):
         return
-    await ultSongs.group_call.start_audio(song)
+    await ultSongs.start_audio(song)
     await xx.reply(
         f"• Started Radio 📻\n\n• Station : `{song}`",
         file="https://telegra.ph/file/d09d4461199bdc7786b01.mp4",
@@ -217,7 +231,7 @@ async def live_stream(e):
         return await xx.eor(f"Only Live Youtube Urls supported!\n{song}")
     file, thumb, title, link, duration = await download(song)
     ultSongs = Player(chat, e)
-    if not ultSongs.group_call.is_connected and not (await ultSongs.vc_joiner()):
+    if not await ultSongs.is_connected() and not (await ultSongs.vc_joiner()):
         return
     from_user = inline_mention(e.sender)
     await xx.reply(
@@ -228,4 +242,4 @@ async def live_stream(e):
         link_preview=False,
     )
     await xx.delete()
-    await ultSongs.group_call.start_audio(file)
+    await ultSongs.start_audio(file)
