@@ -235,28 +235,47 @@ class Player:
             VIDEO_ON[self._chat] = True
 
         if self._chat not in ACTIVE_CALLS:
-            try:
+            async def _join_once():
                 await call.play(
                     self._chat,
                     None,
                     GroupCallConfig(auto_start=True),
                 )
+
+            try:
+                await _join_once()
             except NoActiveGroupCall:
                 dn, err = await self.make_vc_active()
                 if err:
                     return False, err
                 try:
-                    await call.play(
-                        self._chat,
-                        None,
-                        GroupCallConfig(auto_start=True),
-                    )
+                    await _join_once()
                 except Exception as e:
                     LOGS.exception(e)
                     return False, e
+            except (asyncio.TimeoutError, TimeoutError, OSError) as e:
+                # Telegram occasionally times out JoinGroupCallRequest.
+                LOGS.warning("VC join timed out, retrying once: %s", e)
+                await asyncio.sleep(1.5)
+                try:
+                    await _join_once()
+                except Exception as retry_err:
+                    LOGS.exception(retry_err)
+                    return False, retry_err
             except Exception as e:
-                LOGS.exception(e)
-                return False, e
+                # py-tgcalls may wrap Telegram timeouts as generic Exception.
+                msg = str(e).lower()
+                if "timeout" in msg or "joingroupcall" in msg:
+                    LOGS.warning("VC join failed (%s), retrying once", e)
+                    await asyncio.sleep(1.5)
+                    try:
+                        await _join_once()
+                    except Exception as retry_err:
+                        LOGS.exception(retry_err)
+                        return False, retry_err
+                else:
+                    LOGS.exception(e)
+                    return False, e
             if self._chat not in ACTIVE_CALLS:
                 ACTIVE_CALLS.append(self._chat)
         return True, None
